@@ -1,6 +1,7 @@
 package main
 
 import (
+	"chirpy/internal/auth"
 	"chirpy/internal/database"
 	"context"
 	"encoding/json"
@@ -8,9 +9,42 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
+
+func (cfg *apiConfig) RevokeTokenHandler(w http.ResponseWriter, req *http.Request) {
+	refresh_token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+	cfg.dbQueries.TokenRevokeUpdate(context.Background(), refresh_token)
+	respondWithJSON(w, 204, "")
+}
+
+func (cfg *apiConfig) RefreshTokenHandler(w http.ResponseWriter, req *http.Request) {
+	refresh_token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+	token_res, err := cfg.dbQueries.GetUserFromToken(context.Background(), refresh_token)
+	if err != nil {
+		respondWithError(w, 401, "Error fetching token")
+	}
+	if token_res.RevokedAt.Valid {
+		respondWithError(w, 401, "Token has been revoked")
+	}
+	if token_res.ExpiresAt.Before(time.Now()) {
+		respondWithError(w, 401, "Token has expired")
+	}
+	access_token, err := auth.MakeJWT(token_res.UserID, cfg.secret, time.Hour)
+	if err != nil {
+		respondWithError(w, 401, "Unable to create a new token")
+		return
+	}
+	type Response struct {
+		Token string `json:"token"`
+	}
+	respondWithJSON(w, 200, Response{
+		Token: access_token,
+	})
+
+}
 
 func (cfg *apiConfig) GetChirpHandler(w http.ResponseWriter, req *http.Request) {
 	chirpID, err := uuid.Parse(req.PathValue("chirpID"))
@@ -52,9 +86,10 @@ func (cfg *apiConfig) GetChirpsHandler(w http.ResponseWriter, req *http.Request)
 	respondWithJSON(w, 200, res)
 }
 
-func (cfg *apiConfig) CreateUserHandler(w http.ResponseWriter, req *http.Request) {
+func (cfg *apiConfig) LoginUserHandler(w http.ResponseWriter, req *http.Request) {
 	type reqParams struct {
-		Email string `json:"email"`
+		Email    string `json:"email"`
+		Password string `json:"password"`
 	}
 	decoder := json.NewDecoder(req.Body)
 	params := reqParams{}
@@ -63,15 +98,80 @@ func (cfg *apiConfig) CreateUserHandler(w http.ResponseWriter, req *http.Request
 		respondWithError(w, 500, "Error decoding request parameters")
 		return
 	}
-	res, err := cfg.dbQueries.CreateUser(req.Context(), params.Email)
+	//Password Handling
+	user_lookup, err := cfg.dbQueries.UserPasswordLookup(context.Background(), params.Email)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	valid, err := auth.CheckPasswordHash(params.Password, user_lookup.HashedPassword)
+	if err != nil {
+		respondWithError(w, 401, "Error comparing passwords")
+		return
+	}
+	if valid == false {
+		respondWithError(w, 401, "Incorrect email or password")
+		return
+	}
+
+	access_token, err := auth.MakeJWT(user_lookup.ID, cfg.secret, time.Duration(3600)*time.Second)
+	if err != nil {
+		respondWithError(w, 400, "Error creating token")
+		return
+	}
+	refresh_token := auth.MakeRefreshToken()
+	cfg.dbQueries.CreateRefreshToken(context.Background(), database.CreateRefreshTokenParams{
+		Token:  refresh_token,
+		UserID: user_lookup.ID,
+	})
+
+	type response struct {
+		ID           uuid.UUID `json:"id"`
+		CreatedAt    time.Time `json:"created_at"`
+		UpdatedAt    time.Time `json:"updated_at"`
+		Email        string    `json:"email"`
+		Token        string    `json:"token"`
+		RefreshToken string    `json:"refresh_token"`
+	}
+	respondWithJSON(w, 200, response{
+		ID:           user_lookup.ID,
+		CreatedAt:    user_lookup.CreatedAt,
+		UpdatedAt:    user_lookup.UpdatedAt,
+		Email:        user_lookup.Email,
+		Token:        access_token,
+		RefreshToken: refresh_token,
+	})
+}
+
+func (cfg *apiConfig) CreateUserHandler(w http.ResponseWriter, req *http.Request) {
+	type reqParams struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	decoder := json.NewDecoder(req.Body)
+	params := reqParams{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, 500, "Error decoding request parameters")
+		return
+	}
+	hashed_password, err := auth.HashPassword(params.Password)
+	if err != nil {
+		fmt.Println(err)
+	}
+	res, err := cfg.dbQueries.CreateUser(req.Context(), database.CreateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashed_password,
+	})
 	if err != nil {
 		fmt.Println(err)
 	}
 	user := User{
-		ID:        res.ID,
-		CreatedAt: res.CreatedAt,
-		UpdatedAt: res.UpdatedAt,
-		Email:     res.Email,
+		ID:             res.ID,
+		CreatedAt:      res.CreatedAt,
+		UpdatedAt:      res.UpdatedAt,
+		Email:          res.Email,
+		HashedPassword: res.HashedPassword,
 	}
 	respondWithJSON(w, 201, user)
 
@@ -102,12 +202,22 @@ func (cfg *apiConfig) RequestsResetHandler(w http.ResponseWriter, req *http.Requ
 
 func (cfg *apiConfig) CreateChirpHandler(w http.ResponseWriter, req *http.Request) {
 	type parameters struct {
-		Body   string    `json:"body"`
-		UserID uuid.UUID `json:"user_id"`
+		Body string `json:"body"`
+	}
+	token, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		respondWithError(w, 401, "Error fetching bearer token")
+		return
+	}
+
+	user_id, err := auth.ValidateJWT(token, cfg.secret)
+	if err != nil {
+		respondWithError(w, 401, "Error validating bearer token")
+		return
 	}
 	decoder := json.NewDecoder(req.Body)
 	params := parameters{}
-	err := decoder.Decode(&params)
+	err = decoder.Decode(&params)
 	if err != nil {
 		respondWithError(w, 500, "Error decoding request parameters")
 		return
@@ -119,7 +229,7 @@ func (cfg *apiConfig) CreateChirpHandler(w http.ResponseWriter, req *http.Reques
 	params.Body = cleanResponse(params.Body)
 	chirp, err := cfg.dbQueries.CreateChirp(context.Background(), database.CreateChirpParams{
 		Body:   params.Body,
-		UserID: params.UserID,
+		UserID: user_id,
 	})
 	if err != nil {
 		respondWithError(w, 400, fmt.Sprint(err))

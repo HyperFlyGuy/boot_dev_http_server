@@ -14,6 +14,7 @@ import (
 func main() {
 	godotenv.Load(".env")
 	db_url := os.Getenv("DB_URL")
+	server_secret := os.Getenv("SECRET")
 	db, err := sql.Open("postgres", db_url)
 	if err != nil {
 		fmt.Printf("Error connecting to database: %v", err)
@@ -22,6 +23,7 @@ func main() {
 	cfg := apiConfig{
 		dbQueries: database.New(db),
 		platform:  platform,
+		secret:    server_secret,
 	}
 	//Router
 	mux := http.NewServeMux()
@@ -31,6 +33,9 @@ func main() {
 	mux.HandleFunc("GET /api/chirps", cfg.GetChirpsHandler)
 	mux.HandleFunc("GET /api/chirps/{chirpID}", cfg.GetChirpHandler)
 	mux.HandleFunc("POST /api/users", cfg.CreateUserHandler)
+	mux.HandleFunc("POST /api/revoke", cfg.RevokeTokenHandler)
+	mux.HandleFunc("POST /api/refresh", cfg.RefreshTokenHandler)
+	mux.HandleFunc("POST /api/login", cfg.LoginUserHandler)
 	mux.HandleFunc("GET /admin/metrics", cfg.RequestsCountHandler)
 	mux.HandleFunc("POST /admin/reset", cfg.RequestsResetHandler)
 	// Server Configuration
