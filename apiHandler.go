@@ -14,6 +14,130 @@ import (
 	"github.com/google/uuid"
 )
 
+func (cfg *apiConfig) ChirpyRedUpgradeHandler(w http.ResponseWriter, req *http.Request) {
+	type data_shape struct {
+		UserID uuid.UUID `json:"user_id"`
+	}
+	type reqParams struct {
+		Event string     `json:"event"`
+		Data  data_shape `json:"data"`
+	}
+	decoder := json.NewDecoder(req.Body)
+	params := reqParams{}
+	err := decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, 500, "Error decoding request parameters")
+		return
+	}
+	//check for API Key
+	key, err := auth.GetAPIKey(req.Header)
+	if err != nil {
+		respondWithError(w, 401, "Error fetching API Key")
+		return
+	}
+	if key != cfg.polkakey {
+		respondWithError(w, 401, "Invalid API Key")
+		return
+	}
+
+	//check for valid event
+	if params.Event == "user.upgraded" {
+		err := cfg.dbQueries.UpgradeChirpyRed(context.Background(), params.Data.UserID)
+		if err != nil {
+			respondWithError(w, 404, "User not found")
+			return
+		}
+		respondWithJSON(w, 204, "")
+	}
+	respondWithJSON(w, 204, "")
+}
+
+func (cfg *apiConfig) DeleteChirpHandler(w http.ResponseWriter, req *http.Request) {
+	chirpID, err := uuid.Parse(req.PathValue("chirpID"))
+	if err != nil {
+		respondWithError(w, 500, "Invalid chirp ID")
+	}
+	//Validate the access token
+	token, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		respondWithError(w, 401, "Error fetching bearer token")
+		return
+	}
+
+	user_id, err := auth.ValidateJWT(token, cfg.secret)
+	if err != nil {
+		respondWithError(w, 401, "Error validating bearer token")
+		return
+	}
+	// Check if chirp exists
+	chirp, err := cfg.dbQueries.GetChirp(context.Background(), chirpID)
+	if err != nil {
+		respondWithError(w, 404, "Chirp was not found:")
+		return
+	}
+	// Validate user info
+	if chirp.UserID == user_id {
+		err = cfg.dbQueries.DeleteChirp(context.Background(), chirpID)
+		type res struct {
+			Body string
+		}
+		respondWithJSON(w, 204, res{
+			Body: "Chirp has been deleted",
+		})
+	} else {
+		respondWithError(w, 403, "Unauthorized to delete chirp")
+		return
+	}
+}
+
+func (cfg *apiConfig) UpdateUserPasswordHandler(w http.ResponseWriter, req *http.Request) {
+	type reqParams struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	//Validate the access token
+	token, err := auth.GetBearerToken(req.Header)
+	if err != nil {
+		respondWithError(w, 401, "Error fetching bearer token")
+		return
+	}
+
+	user_id, err := auth.ValidateJWT(token, cfg.secret)
+	if err != nil {
+		respondWithError(w, 401, "Error validating bearer token")
+		return
+	}
+	//Decode the request
+	decoder := json.NewDecoder(req.Body)
+	params := reqParams{}
+	err = decoder.Decode(&params)
+	if err != nil {
+		respondWithError(w, 401, "Error decoding request parameters")
+		return
+	}
+	hashed_password, err := auth.HashPassword(params.Password)
+	if err != nil {
+		fmt.Println(err)
+	}
+	//update the user
+	res, err := cfg.dbQueries.UpdateUser(context.Background(), database.UpdateUserParams{
+		Email:          params.Email,
+		HashedPassword: hashed_password,
+		ID:             user_id,
+	})
+	if err != nil {
+		fmt.Println(err)
+	}
+	user := User{
+		ID:        res.ID,
+		CreatedAt: res.CreatedAt,
+		UpdatedAt: res.UpdatedAt,
+		Email:     res.Email,
+	}
+	respondWithJSON(w, 200, user)
+
+}
+
 func (cfg *apiConfig) RevokeTokenHandler(w http.ResponseWriter, req *http.Request) {
 	refresh_token := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
 	cfg.dbQueries.TokenRevokeUpdate(context.Background(), refresh_token)
@@ -43,7 +167,6 @@ func (cfg *apiConfig) RefreshTokenHandler(w http.ResponseWriter, req *http.Reque
 	respondWithJSON(w, 200, Response{
 		Token: access_token,
 	})
-
 }
 
 func (cfg *apiConfig) GetChirpHandler(w http.ResponseWriter, req *http.Request) {
@@ -64,7 +187,9 @@ func (cfg *apiConfig) GetChirpHandler(w http.ResponseWriter, req *http.Request) 
 		User_ID:   chirp.UserID,
 	}
 	respondWithJSON(w, 200, res)
+
 }
+
 func (cfg *apiConfig) GetChirpsHandler(w http.ResponseWriter, req *http.Request) {
 	chirps, err := cfg.dbQueries.GetChirps(context.Background())
 	if err != nil {
@@ -84,6 +209,7 @@ func (cfg *apiConfig) GetChirpsHandler(w http.ResponseWriter, req *http.Request)
 	}
 
 	respondWithJSON(w, 200, res)
+
 }
 
 func (cfg *apiConfig) LoginUserHandler(w http.ResponseWriter, req *http.Request) {
@@ -130,6 +256,7 @@ func (cfg *apiConfig) LoginUserHandler(w http.ResponseWriter, req *http.Request)
 		CreatedAt    time.Time `json:"created_at"`
 		UpdatedAt    time.Time `json:"updated_at"`
 		Email        string    `json:"email"`
+		IsChirpyRed  bool      `json:"is_chirpy_red"`
 		Token        string    `json:"token"`
 		RefreshToken string    `json:"refresh_token"`
 	}
@@ -138,6 +265,7 @@ func (cfg *apiConfig) LoginUserHandler(w http.ResponseWriter, req *http.Request)
 		CreatedAt:    user_lookup.CreatedAt,
 		UpdatedAt:    user_lookup.UpdatedAt,
 		Email:        user_lookup.Email,
+		IsChirpyRed:  user_lookup.IsChirpyRed,
 		Token:        access_token,
 		RefreshToken: refresh_token,
 	})
@@ -172,9 +300,9 @@ func (cfg *apiConfig) CreateUserHandler(w http.ResponseWriter, req *http.Request
 		UpdatedAt:      res.UpdatedAt,
 		Email:          res.Email,
 		HashedPassword: res.HashedPassword,
+		IsChirpyRed:    res.IsChirpyRed,
 	}
 	respondWithJSON(w, 201, user)
-
 }
 
 func ReadinessHandler(w http.ResponseWriter, req *http.Request) {
@@ -243,6 +371,7 @@ func (cfg *apiConfig) CreateChirpHandler(w http.ResponseWriter, req *http.Reques
 		User_ID:   chirp.UserID,
 	}
 	respondWithJSON(w, 201, res)
+
 }
 
 func cleanResponse(body string) string {

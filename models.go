@@ -14,6 +14,7 @@ type User struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 	Email          string    `json:"email"`
 	HashedPassword string    `json:"hashed_password"`
+	IsChirpyRed    bool      `json:"is_chirpy_red"`
 }
 
 type apiConfig struct {
@@ -21,6 +22,7 @@ type apiConfig struct {
 	dbQueries      *database.Queries
 	platform       string
 	secret         string
+	polkakey       string
 }
 
 type Chirp struct {
