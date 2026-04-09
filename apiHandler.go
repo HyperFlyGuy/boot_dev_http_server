@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -196,6 +197,36 @@ func (cfg *apiConfig) GetChirpsHandler(w http.ResponseWriter, req *http.Request)
 		respondWithError(w, 500, "Error retrieving chirps from database")
 		return
 	}
+	if len(req.URL.Query().Get("author_id")) > 0 {
+		author_id, err := uuid.Parse(req.URL.Query().Get("author_id"))
+		if err != nil {
+			respondWithError(w, 404, "Error parsing the author id")
+			return
+		}
+		chirps, err := cfg.dbQueries.GetChirpsByAuthor(context.Background(), author_id)
+		if err != nil {
+			respondWithError(w, 400, "Error fetching chirps from database")
+			return
+		}
+		var res []Chirp
+		for _, chirp := range chirps {
+			c := Chirp{
+				ID:        chirp.ID,
+				CreatedAt: chirp.CreatedAt,
+				UpdatedAt: chirp.UpdatedAt,
+				Body:      chirp.Body,
+				User_ID:   chirp.UserID,
+			}
+			res = append(res, c)
+		}
+		if len(req.URL.Query().Get("sort")) > 0 {
+			if req.URL.Query().Get("sort") == "desc" {
+				sort.Slice(res, func(i, j int) bool { return res[i].CreatedAt.After(res[j].CreatedAt) })
+			}
+		}
+		respondWithJSON(w, 200, res)
+		return
+	}
 	var res []Chirp
 	for _, chirp := range chirps {
 		c := Chirp{
@@ -207,7 +238,11 @@ func (cfg *apiConfig) GetChirpsHandler(w http.ResponseWriter, req *http.Request)
 		}
 		res = append(res, c)
 	}
-
+	if len(req.URL.Query().Get("sort")) > 0 {
+		if req.URL.Query().Get("sort") == "desc" {
+			sort.Slice(res, func(i, j int) bool { return res[i].CreatedAt.After(res[j].CreatedAt) })
+		}
+	}
 	respondWithJSON(w, 200, res)
 
 }
